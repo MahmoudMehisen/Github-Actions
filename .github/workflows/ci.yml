@@ -10,14 +10,14 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    # 👇 Add permissions for pull request comments
     permissions:
-      pull-requests: write  # Required for sticky-pull-request-comment
-      contents: read        # Default permissions
+      pull-requests: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for branch comparison
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -26,8 +26,54 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
+      # Get base branch coverage (master)
+      - name: Checkout base branch for comparison
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin master:master
+          git checkout master
+          mvn test -DskipTests --file pom.xml  # Generate base coverage
+
+      # Run tests on current branch
       - name: Build and Test with Maven
         run: mvn clean test package --file pom.xml
+
+      # Compare coverage between branches
+      - name: Compare Coverage
+        if: github.event_name == 'pull_request'
+        id: compare-coverage
+        run: |
+          # Install xmlstarlet
+          sudo apt-get update && sudo apt-get install -y xmlstarlet bc
+
+          # Get base branch (master) coverage
+          BASE_COV=$(xmlstarlet sel -T -t -m "/report/counter[@type='INSTRUCTION']" \
+            -v "concat(@covered, '/', (number(@covered) + number(@missed)))" \
+            -n target/site/jacoco/jacoco.xml)
+          IFS='/' read -r BASE_COVERED BASE_TOTAL <<< "$BASE_COV"
+          BASE_PERCENT=$(echo "scale=2; $BASE_COVERED*100/$BASE_TOTAL" | bc)
+
+          # Get current branch coverage
+          CURRENT_COV=$(xmlstarlet sel -T -t -m "/report/counter[@type='INSTRUCTION']" \
+            -v "concat(@covered, '/', (number(@covered) + number(@missed)))" \
+            -n target/site/jacoco/jacoco.xml)
+          IFS='/' read -r CURRENT_COVERED CURRENT_TOTAL <<< "$CURRENT_COV"
+          CURRENT_PERCENT=$(echo "scale=2; $CURRENT_COVERED*100/$CURRENT_TOTAL" | bc)
+
+          # Calculate difference
+          DIFF=$(echo "$CURRENT_PERCENT - $BASE_PERCENT" | bc)
+          echo "baseCoverage=$BASE_PERCENT" >> $GITHUB_OUTPUT
+          echo "currentCoverage=$CURRENT_PERCENT" >> $GITHUB_OUTPUT
+          echo "coverageDiff=$DIFF" >> $GITHUB_OUTPUT
+
+          # Fail if below 85%
+          MIN_COVERAGE=85
+          if (( $(echo "$CURRENT_PERCENT < $MIN_COVERAGE" | bc -l) )); then
+            echo "::error::Test coverage ($CURRENT_PERCENT%) is below required minimum ($MIN_COVERAGE%)"
+            exit 1
+          fi
+
+          echo "Coverage: Base=$BASE_PERCENT% Current=$CURRENT_PERCENT% (Change: $DIFF%)"
 
       - name: Upload Jacoco HTML Report
         uses: actions/upload-artifact@v4
@@ -35,23 +81,16 @@ jobs:
           name: jacoco-report
           path: target/site/jacoco
 
-      - name: Extract Jacoco Coverage Percentage
-        id: extract-coverage
-        run: |
-          sudo apt-get update && sudo apt-get install -y xmlstarlet
-          COVERAGE_RATIO=$(xmlstarlet sel -T -t -m "/report/counter[@type='INSTRUCTION']" \
-            -v "concat(@covered, '/', (number(@covered) + number(@missed)))" \
-            -n target/site/jacoco/jacoco.xml)
-          echo "Extracted coverage ratio: $COVERAGE_RATIO"
-          IFS='/' read -r COVERED TOTAL <<< "$COVERAGE_RATIO"
-          PERCENT=$(echo "scale=2; $COVERED*100/$TOTAL" | bc)
-          echo "totalCoverage=$PERCENT" >> "$GITHUB_OUTPUT"
-          echo "Overall Coverage Percentage is: $PERCENT%"
-
       - name: Comment on PR with Coverage Details
         if: github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: "Jacoco Coverage Report"
           message: |
-            **Total Coverage:** ${{ steps.extract-coverage.outputs.totalCoverage }}%
+            **Coverage Analysis**
+            - Base Branch (master): ${{ steps.compare-coverage.outputs.baseCoverage }}%
+            - Current Branch: ${{ steps.compare-coverage.outputs.currentCoverage }}%
+            - Change: ${{ steps.compare-coverage.outputs.coverageDiff }}%
+            
+            ❗ Minimum required coverage: 85%
+            {{if(contains(steps.compare-coverage.outputs.currentCoverage, '85')}}✅ {{else}}❌{{endif}} Current coverage meets requirement
