@@ -15,7 +15,15 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout PR Branch
+      - name: Checkout Merged PR (Simulate Post-Merge)
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+
+      - name: Checkout Branch (Push/Manual)
+        if: github.event_name != 'pull_request'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -27,7 +35,7 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Generate Coverage for PR Branch
+      - name: Run Tests & Generate Coverage (Merged PR or Push)
         run: |
           mvn clean test
           mkdir -p coverage/pr
@@ -62,6 +70,13 @@ jobs:
           echo "prCoverage=$PR_PERCENT" >> $GITHUB_OUTPUT
           echo "coverageDiff=$DIFF" >> $GITHUB_OUTPUT
 
+      - name: Upload Jacoco HTML Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: coverage/pr/html
+
       - name: Comment on PR
         if: github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2
@@ -70,7 +85,7 @@ jobs:
           message: |
             **Coverage Comparison**
             - Base Branch (master): ${{ steps.compare.outputs.baseCoverage }}%
-            - Current PR: ${{ steps.compare.outputs.prCoverage }}%
+            - PR (Post-Merge Simulated): ${{ steps.compare.outputs.prCoverage }}%
             - Difference: ${{ steps.compare.outputs.coverageDiff }}%
 
             ${{ steps.compare.outputs.prCoverage >= 85 && '✅ Coverage meets target' || '⚠️ Coverage is below target (85%)' }}
