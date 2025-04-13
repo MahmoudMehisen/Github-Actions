@@ -50,36 +50,31 @@ jobs:
             echo "::warning::JaCoCo report not found at target/site/jacoco/jacoco.xml"
           fi
 
-      - name: Compare Coverage
+      - name: Prepare Coverage Comment
         if: github.event_name == 'pull_request'
-        id: compare-coverage
+        id: coverage-comment
         run: |
-          sudo apt-get update && sudo apt-get install -y xmlstarlet bc
+          BASE=${{ steps.compare-coverage.outputs.baseCoverage }}
+          CURRENT=${{ steps.compare-coverage.outputs.currentCoverage }}
+          DIFF=${{ steps.compare-coverage.outputs.coverageDiff }}
 
-          BASE_PERCENT=0
-          CURRENT_PERCENT=0
-          DIFF=0
-
-          if [ -f "target/site/jacoco/jacoco.xml" ]; then
-            BASE_COV=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" target/site/jacoco/jacoco.xml 2>/dev/null || echo "0/1")
-            IFS='/' read -r BASE_COVERED BASE_TOTAL <<< "$BASE_COV"
-            BASE_PERCENT=$(echo "scale=2; $BASE_COVERED*100/$BASE_TOTAL" | bc)
+          if (( $(echo "$CURRENT >= 85" | bc -l) )); then
+            STATUS="✅ **PASSED**: Coverage meets 85% target"
+          else
+            STATUS="⚠️ **WARNING**: Coverage (${CURRENT}%) is below 85% target"
           fi
 
-          if [ -f "target/site/jacoco/jacoco.xml" ]; then
-            CURRENT_COV=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" target/site/jacoco/jacoco.xml 2>/dev/null || echo "0/1")
-            IFS='/' read -r CURRENT_COVERED CURRENT_TOTAL <<< "$CURRENT_COV"
-            CURRENT_PERCENT=$(echo "scale=2; $CURRENT_COVERED*100/$CURRENT_TOTAL" | bc)
-          fi
+          {
+            echo "message<<EOF"
+            echo "**Coverage Analysis**"
+            echo "- Base Branch (master): ${BASE}%"
+            echo "- Current Branch: ${CURRENT}%"
+            echo "- Change: ${DIFF}%"
+            echo ""
+            echo "${STATUS}"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
 
-          DIFF=$(echo "$CURRENT_PERCENT - $BASE_PERCENT" | bc)
-          echo "baseCoverage=$BASE_PERCENT" >> $GITHUB_OUTPUT
-          echo "currentCoverage=$CURRENT_PERCENT" >> $GITHUB_OUTPUT
-          echo "coverageDiff=$DIFF" >> $GITHUB_OUTPUT
-
-          if (( $(echo "$CURRENT_PERCENT < 85" | bc -l) )); then
-            echo "::warning::Test coverage ($CURRENT_PERCENT%) is below recommended minimum (85%)"
-          fi
 
       - name: Upload Jacoco HTML Report
         if: always()
