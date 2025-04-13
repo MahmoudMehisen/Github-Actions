@@ -27,9 +27,9 @@ jobs:
       - name: Build and Test with Maven
         run: mvn clean test package --file pom.xml
 
-      # (Optional) Update dependency graph for improved Dependabot alerts
-      - name: Update dependency graph
-        uses: advanced-security/maven-dependency-submission-action@v3
+#      # (Optional) Update dependency graph for improved Dependabot alerts
+#      - name: Update dependency graph
+#        uses: advanced-security/maven-dependency-submission-action@v3
 
       # Upload the generated Jacoco HTML report as an artifact
       - name: Upload Jacoco HTML Report
