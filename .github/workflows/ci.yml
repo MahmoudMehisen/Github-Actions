@@ -15,7 +15,8 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -33,16 +34,14 @@ jobs:
           git fetch origin master:master
           git checkout master
           mvn test -DskipTests --file pom.xml
-          # Fix DTD issue after generating report
           if [ -f "target/site/jacoco/jacoco.xml" ]; then
             sed -i 's|<!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">||' target/site/jacoco/jacoco.xml
           fi
 
-      # Run tests on current branch
+      # Run tests and generate coverage
       - name: Build and Test with Maven
         run: mvn clean test package --file pom.xml
 
-      # Fix DTD issue for current branch
       - name: Fix Jacoco XML report
         run: |
           if [ -f "target/site/jacoco/jacoco.xml" ]; then
@@ -51,49 +50,36 @@ jobs:
             echo "::warning::JaCoCo report not found at target/site/jacoco/jacoco.xml"
           fi
 
-      # Compare coverage between branches
       - name: Compare Coverage
         if: github.event_name == 'pull_request'
         id: compare-coverage
         run: |
-          # Install dependencies
           sudo apt-get update && sudo apt-get install -y xmlstarlet bc
 
-          # Set default coverage values
           BASE_PERCENT=0
           CURRENT_PERCENT=0
           DIFF=0
 
-          # Get base branch (master) coverage if report exists
           if [ -f "target/site/jacoco/jacoco.xml" ]; then
-            BASE_COV=$(xmlstarlet sel -T -t -m "/report/counter[@type='INSTRUCTION']" \
-              -v "concat(@covered, '/', (number(@covered) + number(@missed)))" \
-              -n target/site/jacoco/jacoco.xml 2>/dev/null || echo "0/1")
+            BASE_COV=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" target/site/jacoco/jacoco.xml 2>/dev/null || echo "0/1")
             IFS='/' read -r BASE_COVERED BASE_TOTAL <<< "$BASE_COV"
             BASE_PERCENT=$(echo "scale=2; $BASE_COVERED*100/$BASE_TOTAL" | bc)
           fi
 
-          # Get current branch coverage if report exists
           if [ -f "target/site/jacoco/jacoco.xml" ]; then
-            CURRENT_COV=$(xmlstarlet sel -T -t -m "/report/counter[@type='INSTRUCTION']" \
-              -v "concat(@covered, '/', (number(@covered) + number(@missed)))" \
-              -n target/site/jacoco/jacoco.xml 2>/dev/null || echo "0/1")
+            CURRENT_COV=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" target/site/jacoco/jacoco.xml 2>/dev/null || echo "0/1")
             IFS='/' read -r CURRENT_COVERED CURRENT_TOTAL <<< "$CURRENT_COV"
             CURRENT_PERCENT=$(echo "scale=2; $CURRENT_COVERED*100/$CURRENT_TOTAL" | bc)
           fi
 
-          # Calculate difference
           DIFF=$(echo "$CURRENT_PERCENT - $BASE_PERCENT" | bc)
           echo "baseCoverage=$BASE_PERCENT" >> $GITHUB_OUTPUT
           echo "currentCoverage=$CURRENT_PERCENT" >> $GITHUB_OUTPUT
           echo "coverageDiff=$DIFF" >> $GITHUB_OUTPUT
 
-          MIN_COVERAGE=85
-          if (( $(echo "$CURRENT_PERCENT < $MIN_COVERAGE" | bc -l) )); then
-            echo "::warning::Test coverage ($CURRENT_PERCENT%) is below recommended minimum ($MIN_COVERAGE%)"
+          if (( $(echo "$CURRENT_PERCENT < 85" | bc -l) )); then
+            echo "::warning::Test coverage ($CURRENT_PERCENT%) is below recommended minimum (85%)"
           fi
-
-          echo "Coverage: Base=$BASE_PERCENT% Current=$CURRENT_PERCENT% (Change: $DIFF%)"
 
       - name: Upload Jacoco HTML Report
         if: always()
@@ -102,19 +88,30 @@ jobs:
           name: jacoco-report
           path: target/site/jacoco
 
+      - name: Prepare Coverage Comment
+        if: github.event_name == 'pull_request'
+        id: coverage-comment
+        run: |
+          BASE=${{ steps.compare-coverage.outputs.baseCoverage }}
+          CURRENT=${{ steps.compare-coverage.outputs.currentCoverage }}
+          DIFF=${{ steps.compare-coverage.outputs.coverageDiff }}
+
+          if (( $(echo "$CURRENT >= 85" | bc -l) )); then
+            STATUS="✅ **PASSED**: Coverage meets 85% target"
+          else
+            STATUS="⚠️ **WARNING**: Coverage (${CURRENT}%) is below 85% target"
+          fi
+
+          echo "message=**Coverage Analysis**
+          - Base Branch (master): ${BASE}%
+          - Current Branch: ${CURRENT}%
+          - Change: ${DIFF}%
+
+          ${STATUS}" >> $GITHUB_OUTPUT
+
       - name: Comment on PR with Coverage Details
         if: github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: "Jacoco Coverage Report"
-          message: |
-            **Coverage Analysis**
-            - Base Branch (master): ${{ steps.compare-coverage.outputs.baseCoverage }}%
-            - Current Branch: ${{ steps.compare-coverage.outputs.currentCoverage }}%
-            - Change: ${{ steps.compare-coverage.outputs.coverageDiff }}%
-            
-            {{ if(contains(steps.compare-coverage.outputs.currentCoverage, '85')) }}
-            ✅ **PASSED**: Coverage meets 85% target
-            {{ else }}
-            ⚠️ **WARNING**: Coverage (${{ steps.compare-coverage.outputs.currentCoverage }}%) is below 85% target
-            {{ endif }}
+          message: ${{ steps.coverage-comment.outputs.message }}
