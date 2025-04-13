@@ -1,0 +1,60 @@
+name: PR Build and Test with Jacoco
+
+# Trigger on pull request events targeting master and with a manual dispatch.
+on:
+  pull_request:
+    branches: [ master ]
+    types: [ opened, synchronize, reopened ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout the code from your repository.
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      # Step 2: Setup JDK 17 (Temurin distribution).
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Step 3: Build the project and run tests (Jacoco report will be generated).
+      - name: Build and Test
+        run: mvn clean test
+
+      # Step 4: Upload the Jacoco HTML report as an artifact.
+      - name: Upload Jacoco HTML Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: jacoco-report
+          path: target/site/jacoco
+
+      # Step 5: Extract overall coverage percentage from the Jacoco XML report.
+      - name: Extract Jacoco Coverage Percentage
+        id: extract-coverage
+        run: |
+          # Install xmlstarlet to parse XML.
+          sudo apt-get update && sudo apt-get install -y xmlstarlet
+          # Extract the 'INSTRUCTION' counter info from the jacoco.xml report.
+          # The output will be in the form "covered/total" (e.g., "123/150").
+          COVERAGE_RATIO=$(xmlstarlet sel -T -t -m "/report/counter[@type='INSTRUCTION']" -v "concat(@covered, '/', (number(@covered) + number(@missed)))" -n target/site/jacoco/jacoco.xml)
+          echo "Extracted coverage ratio: $COVERAGE_RATIO"
+          IFS='/' read -r COVERED TOTAL <<< "$COVERAGE_RATIO"
+          # Calculate percentage (scale to two decimals).
+          PERCENT=$(echo "scale=2; $COVERED*100/$TOTAL" | bc)
+          echo "totalCoverage=$PERCENT" >> "$GITHUB_OUTPUT"
+          echo "Overall Coverage Percentage is: $PERCENT%"
+
+      # Step 6: Comment on the PR with the coverage percentage (only when run from a PR event).
+      - name: Comment on PR with Coverage Details
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: "Jacoco Coverage Report"
+          message: |
+            **Total Coverage:** ${{ steps.extract-coverage.outputs.totalCoverage }}%
