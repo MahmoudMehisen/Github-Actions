@@ -90,6 +90,11 @@
 						<goals>
 							<goal>report</goal>
 						</goals>
+						<configuration>
+							<excludes>
+								<exclude>**/GithubactionsApplication.class</exclude> <!-- Adjust if your class is named differently -->
+							</excludes>
+						</configuration>
 					</execution>
 				</executions>
 			</plugin>
