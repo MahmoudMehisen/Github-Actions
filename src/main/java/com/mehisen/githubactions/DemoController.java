@@ -21,4 +21,9 @@ public class DemoController {
     public String welcome() {
         return welcomeMessage;
     }
+
+    @GetMapping("/api/hello-again")
+    public String helloAgain() {
+        return "Hello World!";
+    }
 }
