@@ -8,14 +8,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  coverage:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
       contents: read
 
     steps:
-      - name: Checkout Code
+      - name: Checkout PR Branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -27,93 +27,50 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Checkout base branch for comparison
-        if: github.event_name == 'pull_request'
+      - name: Generate Coverage for PR Branch
         run: |
-          git fetch origin master:master
-          git checkout master
-          mvn test -DskipTests --file pom.xml
-          if [ -f "target/site/jacoco/jacoco.xml" ]; then
-            sed -i 's|<!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">||' target/site/jacoco/jacoco.xml
-          fi
+          mvn clean test
+          mkdir -p coverage/pr
+          cp target/site/jacoco/jacoco.xml coverage/pr/
+          cp -r target/site/jacoco coverage/pr/html
 
-      - name: Build and Test with Maven
-        run: mvn clean test package --file pom.xml
-
-      - name: Fix Jacoco XML report
+      - name: Checkout Base Branch (master)
         run: |
-          if [ -f "target/site/jacoco/jacoco.xml" ]; then
-            sed -i 's|<!DOCTYPE report PUBLIC "-//JACOCO//DTD Report 1.1//EN" "report.dtd">||' target/site/jacoco/jacoco.xml
-          else
-            echo "::warning::JaCoCo report not found at target/site/jacoco/jacoco.xml"
-          fi
+          git fetch origin master
+          git checkout origin/master
+          mvn clean test
+          mkdir -p coverage/base
+          cp target/site/jacoco/jacoco.xml coverage/base/
+          cp -r target/site/jacoco coverage/base/html
 
       - name: Compare Coverage
-        if: github.event_name == 'pull_request'
-        id: compare-coverage
+        id: compare
         run: |
           sudo apt-get update && sudo apt-get install -y xmlstarlet bc
 
-          BASE_PERCENT=0
-          CURRENT_PERCENT=0
-          DIFF=0
+          BASE_COV=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" coverage/base/jacoco.xml)
+          PR_COV=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" coverage/pr/jacoco.xml)
 
-          if [ -f "target/site/jacoco/jacoco.xml" ]; then
-            BASE_COV=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" target/site/jacoco/jacoco.xml 2>/dev/null || echo "0/1")
-            IFS='/' read -r BASE_COVERED BASE_TOTAL <<< "$BASE_COV"
-            BASE_PERCENT=$(echo "scale=2; $BASE_COVERED*100/$BASE_TOTAL" | bc)
-          fi
+          IFS='/' read -r BASE_COVERED BASE_TOTAL <<< "$BASE_COV"
+          IFS='/' read -r PR_COVERED PR_TOTAL <<< "$PR_COV"
 
-          if [ -f "target/site/jacoco/jacoco.xml" ]; then
-            CURRENT_COV=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" target/site/jacoco/jacoco.xml 2>/dev/null || echo "0/1")
-            IFS='/' read -r CURRENT_COVERED CURRENT_TOTAL <<< "$CURRENT_COV"
-            CURRENT_PERCENT=$(echo "scale=2; $CURRENT_COVERED*100/$CURRENT_TOTAL" | bc)
-          fi
+          BASE_PERCENT=$(echo "scale=2; 100 * $BASE_COVERED / $BASE_TOTAL" | bc)
+          PR_PERCENT=$(echo "scale=2; 100 * $PR_COVERED / $PR_TOTAL" | bc)
+          DIFF=$(echo "scale=2; $PR_PERCENT - $BASE_PERCENT" | bc)
 
-          DIFF=$(echo "$CURRENT_PERCENT - $BASE_PERCENT" | bc)
           echo "baseCoverage=$BASE_PERCENT" >> $GITHUB_OUTPUT
-          echo "currentCoverage=$CURRENT_PERCENT" >> $GITHUB_OUTPUT
+          echo "prCoverage=$PR_PERCENT" >> $GITHUB_OUTPUT
           echo "coverageDiff=$DIFF" >> $GITHUB_OUTPUT
 
-          if (( $(echo "$CURRENT_PERCENT < 85" | bc -l) )); then
-            echo "::warning::Test coverage ($CURRENT_PERCENT%) is below recommended minimum (85%)"
-          fi
-
-      - name: Upload Jacoco HTML Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jacoco-report
-          path: target/site/jacoco
-
-      - name: Prepare Coverage Comment
-        if: github.event_name == 'pull_request'
-        id: coverage-comment
-        run: |
-          BASE=${{ steps.compare-coverage.outputs.baseCoverage }}
-          CURRENT=${{ steps.compare-coverage.outputs.currentCoverage }}
-          DIFF=${{ steps.compare-coverage.outputs.coverageDiff }}
-
-          if (( $(echo "$CURRENT >= 85" | bc -l) )); then
-            STATUS="✅ **PASSED**: Coverage meets 85% target"
-          else
-            STATUS="⚠️ **WARNING**: Coverage (${CURRENT}%) is below 85% target"
-          fi
-
-          {
-            echo "message<<EOF"
-            echo "**Coverage Analysis**"
-            echo "- Base Branch (master): ${BASE}%"
-            echo "- Current Branch: ${CURRENT}%"
-            echo "- Change: ${DIFF}%"
-            echo ""
-            echo "${STATUS}"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
-
-      - name: Comment on PR with Coverage Details
+      - name: Comment on PR
         if: github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: "Jacoco Coverage Report"
-          message: ${{ steps.coverage-comment.outputs.message }}
+          message: |
+            **Coverage Comparison**
+            - Base Branch (master): ${{ steps.compare.outputs.baseCoverage }}%
+            - Current PR: ${{ steps.compare.outputs.prCoverage }}%
+            - Difference: ${{ steps.compare.outputs.coverageDiff }}%
+
+            ${{ steps.compare.outputs.prCoverage >= 85 && '✅ Coverage meets target' || '⚠️ Coverage is below target (85%)' }}
