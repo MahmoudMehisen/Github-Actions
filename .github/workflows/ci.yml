@@ -3,8 +3,6 @@ name: Java CI with Maven and Coverage
 on:
   pull_request:
     branches: [ "master" ]
-  push:
-    branches: [ "master" ]
   workflow_dispatch:
 
 jobs:
@@ -15,9 +13,10 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout PR Branch
+      - name: Checkout Base Branch (master)
         uses: actions/checkout@v4
         with:
+          ref: master
           fetch-depth: 0
 
       - name: Set up JDK 17
@@ -27,65 +26,44 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: Run Tests on Current PR Branch
+      - name: Run Tests on Base Branch
         run: |
-          mvn clean test
-          mkdir -p coverage/pr
-          cp target/site/jacoco/jacoco.xml coverage/pr/
-          cp -r target/site/jacoco coverage/pr/html
-
-      - name: Fetch and Merge PR into Base Branch (Simulate After Merge)
-        run: |
-          git fetch origin master
-          git checkout -b merged origin/master
-          git merge --no-ff ${{ github.head_ref }} -m "Simulate post-merge"
-          mvn clean test
-          mkdir -p coverage/merged
-          cp target/site/jacoco/jacoco.xml coverage/merged/
-          cp -r target/site/jacoco coverage/merged/html
-
-      - name: Checkout Base Branch (master)
-        run: |
-          git checkout origin/master
           mvn clean test
           mkdir -p coverage/base
           cp target/site/jacoco/jacoco.xml coverage/base/
           cp -r target/site/jacoco coverage/base/html
 
-      - name: Compare Coverage
+      - name: Simulate Merge PR into Base Branch
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI Bot"
+          git fetch origin ${{ github.head_ref }}:pr-branch
+          git checkout -b merged master
+          git merge --no-ff pr-branch -m "Simulate merge for test"
+          mvn clean test
+          mkdir -p coverage/merged
+          cp target/site/jacoco/jacoco.xml coverage/merged/
+          cp -r target/site/jacoco coverage/merged/html
+
+      - name: Compare Coverage (Base vs Merged)
         id: compare
         run: |
           sudo apt-get update && sudo apt-get install -y xmlstarlet bc
 
-          get_cov() {
+          get_coverage_percent() {
             local file=$1
-            xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" "$file"
+            local result=$(xmlstarlet sel -t -v "concat(/report/counter[@type='INSTRUCTION']/@covered, '/', (/report/counter[@type='INSTRUCTION']/@covered + /report/counter[@type='INSTRUCTION']/@missed))" "$file")
+            IFS='/' read -r COVERED TOTAL <<< "$result"
+            echo "scale=2; 100 * $COVERED / $TOTAL" | bc
           }
 
-          calc_percent() {
-            local covered=$1
-            local total=$2
-            echo "scale=2; 100 * $covered / $total" | bc
-          }
-
-          # Base
-          BASE_COV=$(get_cov coverage/base/jacoco.xml)
-          IFS='/' read -r BASE_COVERED BASE_TOTAL <<< "$BASE_COV"
-          BASE_PERCENT=$(calc_percent $BASE_COVERED $BASE_TOTAL)
-
-          # PR Branch
-          PR_COV=$(get_cov coverage/pr/jacoco.xml)
-          IFS='/' read -r PR_COVERED PR_TOTAL <<< "$PR_COV"
-          PR_PERCENT=$(calc_percent $PR_COVERED $PR_TOTAL)
-
-          # Merged
-          MERGED_COV=$(get_cov coverage/merged/jacoco.xml)
-          IFS='/' read -r MERGED_COVERED MERGED_TOTAL <<< "$MERGED_COV"
-          MERGED_PERCENT=$(calc_percent $MERGED_COVERED $MERGED_TOTAL)
+          BASE_PERCENT=$(get_coverage_percent coverage/base/jacoco.xml)
+          MERGED_PERCENT=$(get_coverage_percent coverage/merged/jacoco.xml)
+          DIFF=$(echo "scale=2; $MERGED_PERCENT - $BASE_PERCENT" | bc)
 
           echo "baseCoverage=$BASE_PERCENT" >> $GITHUB_OUTPUT
-          echo "prCoverage=$PR_PERCENT" >> $GITHUB_OUTPUT
           echo "mergedCoverage=$MERGED_PERCENT" >> $GITHUB_OUTPUT
+          echo "coverageDiff=$DIFF" >> $GITHUB_OUTPUT
 
       - name: Upload Jacoco HTML Reports
         if: always()
@@ -93,9 +71,8 @@ jobs:
         with:
           name: jacoco-report
           path: |
-            coverage/pr/html
-            coverage/merged/html
             coverage/base/html
+            coverage/merged/html
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
@@ -103,7 +80,9 @@ jobs:
         with:
           header: "Jacoco Coverage Report"
           message: |
-            **Coverage Breakdown**
-            - 🔁 Base Branch (`master`): `${{ steps.compare.outputs.baseCoverage }}%`
-            - 🧪 Current PR Branch: `${{ steps.compare.outputs.prCoverage }}%`
+            **JaCoCo Coverage Analysis**
+            - 📦 Base Branch (master): `${{ steps.compare.outputs.baseCoverage }}%`
             - 🔀 After Merge (Simulated): `${{ steps.compare.outputs.mergedCoverage }}%`
+            - 📉 Change: `${{ steps.compare.outputs.coverageDiff }}%`
+
+            ${{ steps.compare.outputs.mergedCoverage >= 85 && '✅ Coverage meets target' || '⚠️ Coverage is below target (85%)' }}
