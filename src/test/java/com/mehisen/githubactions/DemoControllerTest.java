@@ -30,4 +30,11 @@ public class DemoControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("Hello from test env!")));
     }
+
+    @Test
+    void testHelloAgain() throws Exception {
+        mockMvc.perform(get("/api/hello-again"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("Hello World!")));
+    }
 }
